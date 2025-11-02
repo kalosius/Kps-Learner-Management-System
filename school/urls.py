@@ -2,7 +2,8 @@ from rest_framework.routers import DefaultRouter
 from django.urls import path
 from .views import (
     StudentViewSet, AssessmentViewSet, GradeEntryViewSet,
-    AttendanceViewSet, BehaviourViewSet, RegisterView, LoginView, MeView
+    AttendanceViewSet, BehaviourViewSet, RegisterView, LoginView, MeView,
+    DashboardView,
 )
 
 router = DefaultRouter()
@@ -16,6 +17,7 @@ urlpatterns = [
     path('auth/register/', RegisterView.as_view(), name='register'),
     path('auth/login/', LoginView.as_view(), name='login'),
     path('auth/me/', MeView.as_view(), name='me'),
+    path('dashboard/', DashboardView.as_view(), name='dashboard'),
 
 ]
 

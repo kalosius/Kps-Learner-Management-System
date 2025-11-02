@@ -4,7 +4,8 @@ from .models import User, Student, SchoolClass, Subject, Assessment, GradeEntry,
 class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ('id','username','first_name','last_name','email','role','phone')
+        # include is_staff/is_superuser so frontend can make correct role checks
+        fields = ('id','username','first_name','last_name','email','role','phone','is_staff','is_superuser')
 
 class SchoolClassSerializer(serializers.ModelSerializer):
     class Meta:

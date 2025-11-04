@@ -28,56 +28,97 @@ class DashboardView(APIView):
         # require authenticated user and either admin/teacher role or superuser
         if not user or not user.is_authenticated:
             return Response({'detail': 'Authentication required'}, status=status.HTTP_401_UNAUTHORIZED)
+        role = getattr(user, 'role', None)
 
-        if not (getattr(user, 'role', None) in ('admin', 'teacher') or getattr(user, 'is_superuser', False)):
-            return Response({'detail': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
+        # Admin / teacher aggregated dashboard
+        if role in ('admin', 'teacher') or getattr(user, 'is_superuser', False):
+            # totals
+            total_students = Student.objects.count()
+            total_parents = User.objects.filter(role='parent').count()
+            total_teachers = User.objects.filter(role='teacher').count()
 
-        # totals
-        total_students = Student.objects.count()
-        total_parents = User.objects.filter(role='parent').count()
-        total_teachers = User.objects.filter(role='teacher').count()
-
-        # recent students
-        recent_students_qs = Student.objects.select_related('current_class').order_by('-created_at')[:6]
-        recent_students = [
-            {
-                'id': s.id,
-                'first_name': s.first_name,
-                'last_name': s.last_name,
-                'admission_number': s.admission_number,
+            # recent students
+            recent_students_qs = Student.objects.select_related('current_class').order_by('-created_at')[:6]
+            recent_students = [
+                {
+                    'id': s.id,
+                    'first_name': s.first_name,
+                    'last_name': s.last_name,
+                    'admission_number': s.admission_number,
                     'class': s.current_class.name if s.current_class else None,
                     'created_at': s.created_at.isoformat() if getattr(s, 'created_at', None) is not None else None,
+                }
+                for s in recent_students_qs
+            ]
+
+            # recent incidents
+            recent_incidents_qs = BehaviourIncident.objects.select_related('student').order_by('-date')[:6]
+            recent_incidents = [
+                {
+                    'id': i.id,
+                    'student': {'id': i.student.id, 'name': f"{i.student.first_name} {i.student.last_name}"} if i.student else None,
+                    'date': i.date.isoformat() if getattr(i, 'date', None) is not None else None,
+                    'severity': i.severity,
+                    'description': (i.description[:140] + '...') if i.description and len(i.description) > 140 else i.description,
+                }
+                for i in recent_incidents_qs
+            ]
+
+            # today's attendance summary
+            today = timezone.now().date()
+            attendance_today = AttendanceRecord.objects.filter(date=today).count()
+
+            data = {
+                'total_students': total_students,
+                'total_parents': total_parents,
+                'total_teachers': total_teachers,
+                'attendance_today': attendance_today,
+                'recent_students': recent_students,
+                'recent_incidents': recent_incidents,
             }
-            for s in recent_students_qs
-        ]
 
-        # recent incidents
-        recent_incidents_qs = BehaviourIncident.objects.select_related('student').order_by('-date')[:6]
-        recent_incidents = [
-            {
-                'id': i.id,
-                'student': {'id': i.student.id, 'name': f"{i.student.first_name} {i.student.last_name}"} if i.student else None,
-                'date': i.date.isoformat() if getattr(i, 'date', None) is not None else None,
-                'severity': i.severity,
-                'description': (i.description[:140] + '...') if i.description and len(i.description) > 140 else i.description,
+            return Response(data)
+
+        # Parent-specific dashboard
+        if role == 'parent':
+            # students where this user is guardian
+            students_qs = Student.objects.filter(guardian=user).select_related('current_class')
+            students = [
+                {
+                    'id': s.id,
+                    'first_name': s.first_name,
+                    'last_name': s.last_name,
+                    'admission_number': s.admission_number,
+                    'class': s.current_class.name if s.current_class else None,
+                }
+                for s in students_qs
+            ]
+
+            today = timezone.now().date()
+            attendance_today = AttendanceRecord.objects.filter(student__guardian=user, date=today).count()
+
+            recent_incidents_qs = BehaviourIncident.objects.select_related('student').filter(student__guardian=user).order_by('-date')[:6]
+            recent_incidents = [
+                {
+                    'id': i.id,
+                    'student': {'id': i.student.id, 'name': f"{i.student.first_name} {i.student.last_name}"} if i.student else None,
+                    'date': i.date.isoformat() if getattr(i, 'date', None) is not None else None,
+                    'severity': i.severity,
+                    'description': (i.description[:140] + '...') if i.description and len(i.description) > 140 else i.description,
+                }
+                for i in recent_incidents_qs
+            ]
+
+            data = {
+                'students': students,
+                'attendance_today': attendance_today,
+                'recent_incidents': recent_incidents,
             }
-            for i in recent_incidents_qs
-        ]
 
-        # today's attendance summary
-        today = timezone.now().date()
-        attendance_today = AttendanceRecord.objects.filter(date=today).count()
+            return Response(data)
 
-        data = {
-            'total_students': total_students,
-            'total_parents': total_parents,
-            'total_teachers': total_teachers,
-            'attendance_today': attendance_today,
-            'recent_students': recent_students,
-            'recent_incidents': recent_incidents,
-        }
-
-        return Response(data)
+        # all other roles are forbidden from this aggregated endpoint
+        return Response({'detail': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
 
 class IsTeacher(permissions.BasePermission):
     def has_permission(self, request, view):

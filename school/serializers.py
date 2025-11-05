@@ -49,3 +49,23 @@ class NotificationSerializer(serializers.ModelSerializer):
 
 
 # nested serializers for detailed student pages.
+
+
+# --- Messaging serializers ---
+class MessageSerializer(serializers.ModelSerializer):
+    sender = UserSerializer(read_only=True)
+    read_by = UserSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Message
+        fields = ('id', 'thread', 'sender', 'body', 'sent_at', 'read_by')
+        read_only_fields = ('sender', 'sent_at', 'read_by')
+
+
+class MessageThreadSerializer(serializers.ModelSerializer):
+    participants = UserSerializer(many=True, read_only=True)
+    messages = MessageSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = MessageThread
+        fields = ('id', 'subject', 'participants', 'created_at', 'messages')

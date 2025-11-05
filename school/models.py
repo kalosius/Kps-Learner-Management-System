@@ -146,6 +146,8 @@ class BehaviourIncident(models.Model):
 # --- Messaging between teacher/parent/admin ---
 class MessageThread(models.Model):
     subject = models.CharField(max_length=200)
+    # participants (parents, teachers, admins) who are part of the thread
+    participants = models.ManyToManyField('User', related_name='threads', blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
 class Message(models.Model):

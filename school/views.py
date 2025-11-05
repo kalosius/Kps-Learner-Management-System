@@ -13,6 +13,8 @@ from django.contrib.auth import authenticate
 from . import serializers
 
 from django.utils import timezone
+from asgiref.sync import async_to_sync
+from channels.layers import get_channel_layer
 
 
 class DashboardView(APIView):
@@ -119,6 +121,51 @@ class DashboardView(APIView):
 
         # all other roles are forbidden from this aggregated endpoint
         return Response({'detail': 'Forbidden'}, status=status.HTTP_403_FORBIDDEN)
+
+
+class UserViewSet(viewsets.ModelViewSet):
+    """API for managing users. Admins/teachers see all users. Parents only see their own record.
+
+    Creating a user will use Django's create_user helper so passwords are hashed.
+    """
+    queryset = User.objects.all()
+    serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = getattr(self.request, 'user', None)
+        qs = super().get_queryset()
+        # parents should not see other users
+        if user and user.is_authenticated and getattr(user, 'role', None) == 'parent':
+            return qs.filter(id=user.id)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        # allow only admin/teacher users to create other users via this view
+        user = request.user
+        if not (getattr(user, 'role', None) in ('admin', 'teacher') or getattr(user, 'is_superuser', False)):
+            return Response({'detail': 'Permission denied'}, status=status.HTTP_403_FORBIDDEN)
+
+        data = request.data
+        username = data.get('username') or data.get('email')
+        if not username:
+            return Response({'error': 'username or email required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if User.objects.filter(username=username).exists():
+            return Response({'error': 'Username already exists'}, status=status.HTTP_400_BAD_REQUEST)
+
+        password = data.get('password')
+        user_obj = User.objects.create_user(
+            username=username,
+            password=password,
+            email=data.get('email', ''),
+            first_name=data.get('first_name', ''),
+            last_name=data.get('last_name', ''),
+            role=data.get('role', 'parent'),
+            phone=data.get('phone', '')
+        )
+        serializer = self.get_serializer(user_obj)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 class IsTeacher(permissions.BasePermission):
     def has_permission(self, request, view):
@@ -246,6 +293,123 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
         n.is_read = True
         n.save()
         return Response({'status':'ok'})
+
+
+class MessageThreadViewSet(viewsets.ModelViewSet):
+    """Threads between users and nested messages endpoint.
+
+    - list: parents see only threads they participate in; teachers/admins see all threads
+    - create: provide subject and participants (list of user ids). Optionally include `initial_message` to seed the thread.
+    - messages (action): GET messages for a thread, POST to add a new message to the thread.
+    """
+    queryset = MessageThread.objects.all().order_by('-created_at')
+    serializer_class = serializers.MessageThreadSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = super().get_queryset()
+        if user and getattr(user, 'role', None) == 'parent':
+            return qs.filter(participants=user)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        data = request.data
+        subject = data.get('subject', '').strip()
+        participants = data.get('participants', []) or []
+        initial_message = data.get('initial_message', '')
+
+        if not subject:
+            return Response({'error': 'subject required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        thread = MessageThread.objects.create(subject=subject)
+        # make sure the requesting user is a participant
+        try:
+            thread.participants.add(request.user)
+        except Exception:
+            pass
+
+        # add provided participant ids
+        if participants and isinstance(participants, (list, tuple)):
+            users = User.objects.filter(id__in=participants)
+            for u in users:
+                thread.participants.add(u)
+
+        # optionally create initial message
+        if initial_message:
+            m = Message.objects.create(thread=thread, sender=request.user, body=initial_message)
+            # mark sender as having read their own message
+            try:
+                m.read_by.add(request.user)
+            except Exception:
+                pass
+            # notify other participants about unread count
+            try:
+                channel_layer = get_channel_layer()
+                for u in thread.participants.all():
+                    if u.id == request.user.id:
+                        continue
+                    unread = Message.objects.filter(thread__participants=u).exclude(read_by=u).count()
+                    async_to_sync(channel_layer.group_send)(f'user_{u.id}', {'type': 'unread.count', 'unread': unread})
+            except Exception:
+                pass
+
+        serializer = self.get_serializer(thread)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get', 'post'])
+    def messages(self, request, pk=None):
+        thread = self.get_object()
+        if request.method == 'GET':
+            qs = thread.messages.select_related('sender').all().order_by('sent_at')
+            # mark as read for the requesting user
+            for m in qs:
+                if request.user not in m.read_by.all():
+                    m.read_by.add(request.user)
+            # send updated unread count for this user
+            try:
+                channel_layer = get_channel_layer()
+                unread = Message.objects.filter(thread__participants=request.user).exclude(read_by=request.user).count()
+                async_to_sync(channel_layer.group_send)(f'user_{request.user.id}', {'type': 'unread.count', 'unread': unread})
+            except Exception:
+                pass
+            serializer = serializers.MessageSerializer(qs, many=True)
+            return Response(serializer.data)
+
+        # POST: create a new message in the thread
+        body = request.data.get('body', '').strip()
+        if not body:
+            return Response({'error': 'body required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        msg = Message.objects.create(thread=thread, sender=request.user, body=body)
+        try:
+            msg.read_by.add(request.user)
+        except Exception:
+            pass
+        # notify other participants about unread count
+        try:
+            channel_layer = get_channel_layer()
+            for u in thread.participants.all():
+                if u.id == request.user.id:
+                    continue
+                unread = Message.objects.filter(thread__participants=u).exclude(read_by=u).count()
+                async_to_sync(channel_layer.group_send)(f'user_{u.id}', {'type': 'unread.count', 'unread': unread})
+        except Exception:
+            pass
+        serializer = serializers.MessageSerializer(msg)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['get'])
+    def unread_count(self, request):
+        """Return the number of unread messages for the current user."""
+        user = request.user
+        if not user or not user.is_authenticated:
+            return Response({'unread': 0})
+
+        # messages in threads where the user is a participant and they have not read the message
+        qs = Message.objects.filter(thread__participants=user).exclude(read_by=user)
+        count = qs.count()
+        return Response({'unread': count})
 
 
 # login and registration views

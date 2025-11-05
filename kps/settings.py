@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',
     'rest_framework',
     'rest_framework_simplejwt',
     'corsheaders',
@@ -67,6 +68,7 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'kps.wsgi.application'
+ASGI_APPLICATION = 'kps.asgi.application'
 
 
 # Database
@@ -135,3 +137,10 @@ REST_FRAMEWORK = {
 
 
 AUTH_USER_MODEL = 'school.User'
+
+# Channels - simple in-memory layer for development
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    }
+}
